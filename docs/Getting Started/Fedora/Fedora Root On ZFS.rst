@@ -108,7 +108,7 @@ encrypted once per disk. This manual describes LUKS configuration only as an exa
 Step 1: Prepare The Install Environment
 ---------------------------------------
 
-#. Create a Fedora Workstation Live CD or USB. Note that you can do this through either Fedora Media Writer or using any other DVD or USB writing software.
+#. Create a Fedora Workstation Live CD or USB. Note that you can do this through either `Fedora Media Writer <https://docs.fedoraproject.org/en-US/fedora/f33/install-guide/install/Preparing_for_Installation/#_fedora_media_writer>`__ or using any other DVD or USB writing software.
 
 #. Boot the Fedora Workstation Live CD or USB that you made in Step 1.
 
@@ -123,10 +123,10 @@ Step 1: Prepare The Install Environment
      sudo systemctl restart sshd
 
    **Hint:** You can find your IP address with
-   ``ip addr show scope global | grep inet``. Then, from your main machine,
-   connect with ``ssh user@IP``.
+   ``hostname -i`` or if you have multiple interfaces ``hostname -I``.
+#. Add a password to the root user ``sudo passwd``, and enable ssh to root user ``printf '%s\n' 0a 'PermitRootLogin yes' . x | sudo ex /etc/ssh/sshd_config`` and restart the sshd service ``sudo systemctl restart sshd``. Then, from your main machine,
+   connect with ``ssh root@IP``.
 
-#. Become root using ``sudo -i`` OR ``su root``
 
 .. note::
    From here on out, all commands will assert that you are root unless previously specified
@@ -135,12 +135,55 @@ Step 1: Prepare The Install Environment
 
 #. Install the kernel headers using ``dnf install kernel-devel-$(uname -r)``. Note that you may need to use Bodhi if the kernel your version of Fedora is using is too old.
 
+   .. note::
+      If using secureboot, the zfs `kenrel module must be signed <https://docs.fedoraproject.org/en-US/fedora/f33/system-administrators-guide/kernel-module-driver-configuration/Working_with_Kernel_Modules/#sect-signing-kernel-modules-for-secure-boot>`__ before it can be loaded::
+   
+        dnf install openssl perl mokutil keyutils dkms
+        mok_dir=/var/lib/shim-signed/mok/
+        mkdir -p ${mok_dir}
+        cat << EOF > configuration_file.config
+        [ req ]
+        default_bits = 4096
+        distinguished_name = req_distinguished_name
+        prompt = no
+        string_mask = utf8only
+        x509_extensions = myexts
+
+        [ req_distinguished_name ]
+        CN = my Machine Owner Key
+      
+        [ myexts ]
+        basicConstraints=critical,CA:FALSE
+        keyUsage=digitalSignature
+        subjectKeyIdentifier=hash
+        authorityKeyIdentifier=keyid
+        EOF
+        openssl req -x509 -new -nodes -utf8 -sha512 -days 36500 \
+        -batch -config configuration_file.config -outform DER \
+        -out ${mok_dir}/MOK.der \
+        -keyout ${mok_dir}/MOK.priv
+        # Use the keys by default in dkms:
+        echo 'sign_tool="/etc/dkms/sign_helper.sh"' >> /etc/dkms/framework.conf
+        cat << EOF > /etc/dkms/sign_helper.sh
+        #!/bin/sh
+        /lib/modules/"\$1"/build/scripts/sign-file sha512 ${mok_dir}/MOK.priv ${mok_dir}/MOK.der "\$2"
+        EOF
+        chmod +x /etc/dkms/sign_helper.sh
+        # Add the public key to EFI:
+        mokutil --import ${mok_dir}/MOK.der
+        # You will be asked to enter and confirm a password for this MOK enrollment request.
+        # **Copy 4 files to an external device** - the key pair, the dkms framework.conf and the dkms sign_helper.sh - so they can be brought back after reboot,
+        # reboot and restart this guide, after copying the files back.
+        # During boot you will be asked for the password again, to enroll the key.
+      
+
 #. Next swap the zfs FUSE with the openZFS kernel module: ``dnf swap zfs-fuse zfs``
 
 #. Install the zfs dracut module (needed for booting): ``dnf install zfs-dracut``
 
-#. Ensure that the zfs kernel module is loaded by running ``sudo modprobe zfs``.
+#. Ensure that the zfs kernel module is loaded by running ``modprobe zfs``.
 
+      
 #. Define the hostid by running ``dd if=/dev/random of=/etc/hostid bs=1 count=4``. If you are curious to know your own hostid, you can run ``hostid | perl -e '$/=\2; $,="."; $\="\n"; print map { eval "0x$_" } (<>)[1,0,3,2];'``
 
 Step 2: Disk Formatting
@@ -403,6 +446,14 @@ Step 3: System Installation
    
    It is important to not forget the trailing /.
    This command copies the LiveCD to our new zfs datasets and this is the only way I have found to reliably install and boot Fedora Workstation
+   
+   Alternative::
+    
+    dnf --releasever=$(rpm -E %fedora) --installroot=/mnt/ install @"Fedora Workstation"
+    systemd-firstboot --root=/mnt/ --copy --setup-machine-id
+    # '--copy' does eesentialy the same as rsync - it copies the current host's settings into the image.
+    # --setup-machine-id might be cleaner than previous step of using /dev/random to initialize machine-id
+    systemd-nspawn -bD /mnt/ # Replaces mount --rbind ... chroot block later on.
 
 Step 4: System Configuration
 ----------------------------
